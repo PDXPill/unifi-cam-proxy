@@ -18,7 +18,7 @@ RUN apk add --update \
         rust \
         zlib-dev
 
-RUN pip install -U pip wheel setuptools maturin poetry-core
+RUN pip install -U pip wheel setuptools maturin poetry-core pybind11
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-build-isolation
 
