@@ -1,7 +1,7 @@
 ARG version=3.9
 ARG tag=${version}-alpine3.17
 
-FROM python:${tag} as builder
+FROM python:${tag} AS builder
 WORKDIR /app
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
@@ -35,7 +35,7 @@ COPY --from=builder \
 RUN apk add --update ffmpeg netcat-openbsd libusb-dev
 
 COPY . .
-RUN pip install . --no-cache-dir
+RUN pip install . --no-cache-dir --no-deps
 
 COPY ./docker/entrypoint.sh /
 
