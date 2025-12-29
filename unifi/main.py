@@ -5,7 +5,7 @@ import sys
 from shutil import which
 
 import coloredlogs
-from pyunifiprotect import ProtectApiClient
+from uiprotect import ProtectApiClient
 
 from unifi.cams import (
     DahuaCam,
@@ -118,6 +118,7 @@ def parse_args():
 
 
 async def generate_token(args, logger):
+    protect = None
     try:
         protect = ProtectApiClient(
             args.host, 443, args.nvr_username, args.nvr_password, verify_ssl=False
@@ -132,7 +133,8 @@ async def generate_token(args, logger):
         )
         return None
     finally:
-        await protect.close_session()
+        if protect is not None:
+            await protect.close_session()
 
 
 async def run():

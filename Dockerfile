@@ -1,4 +1,4 @@
-ARG version=3.9
+ARG version=3.10
 ARG tag=${version}-alpine3.17
 
 FROM python:${tag} AS builder
@@ -32,7 +32,7 @@ COPY --from=builder \
         /usr/local/lib/python${version}/site-packages \
         /usr/local/lib/python${version}/site-packages
 
-RUN apk add --update ffmpeg netcat-openbsd libusb-dev
+RUN apk add --update ffmpeg netcat-openbsd libusb-dev jpeg libgcc libstdc++
 
 COPY . .
 RUN pip install . --no-cache-dir --no-deps
