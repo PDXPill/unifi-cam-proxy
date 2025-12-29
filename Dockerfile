@@ -1,4 +1,4 @@
-ARG version=3.10
+ARG version=3.11
 ARG tag=${version}-alpine3.17
 
 FROM python:${tag} AS builder
@@ -18,7 +18,7 @@ RUN apk add --update \
         rust \
         zlib-dev
 
-RUN pip install -U pip wheel setuptools maturin
+RUN pip install -U pip wheel setuptools maturin poetry-core
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-build-isolation
 
