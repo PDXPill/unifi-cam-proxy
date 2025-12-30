@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import ssl
 
 import backoff
@@ -40,12 +41,42 @@ class Core(object):
             nonlocal has_connected
             self.logger.info(f"Creating ws connection to {uri}")
             try:
-                ws = await websockets.connect(
-                    uri,
-                    extra_headers=headers,
-                    ssl=self.ssl_context,
-                    subprotocols=["secure_transfer"],
-                )
+                connect_kwargs = {
+                    "ssl": self.ssl_context,
+                    "subprotocols": ["secure_transfer"],
+                }
+                try:
+                    connect_sig = inspect.signature(websockets.connect)
+                except (TypeError, ValueError):
+                    connect_sig = None
+
+                if connect_sig is not None and "additional_headers" in connect_sig.parameters:
+                    connect_kwargs["additional_headers"] = headers
+                else:
+                    connect_kwargs["extra_headers"] = headers
+
+                try:
+                    ws = await websockets.connect(uri, **connect_kwargs)
+                except TypeError as e:
+                    msg = str(e)
+                    if (
+                        "unexpected keyword argument 'extra_headers'" in msg
+                        and "extra_headers" in connect_kwargs
+                    ):
+                        connect_kwargs["additional_headers"] = connect_kwargs.pop(
+                            "extra_headers"
+                        )
+                        ws = await websockets.connect(uri, **connect_kwargs)
+                    elif (
+                        "unexpected keyword argument 'additional_headers'" in msg
+                        and "additional_headers" in connect_kwargs
+                    ):
+                        connect_kwargs["extra_headers"] = connect_kwargs.pop(
+                            "additional_headers"
+                        )
+                        ws = await websockets.connect(uri, **connect_kwargs)
+                    else:
+                        raise
                 has_connected = True
             except websockets.exceptions.InvalidStatusCode as e:
                 if e.status_code == 403:
