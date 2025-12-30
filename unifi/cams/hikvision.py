@@ -16,6 +16,8 @@ from unifi.cams.base import UnifiCamBase
 class HikvisionCam(UnifiCamBase):
     def __init__(self, args: argparse.Namespace, logger: logging.Logger) -> None:
         super().__init__(args, logger)
+        # Hikvision delivers two usable streams (main/sub); cap to avoid a third copy.
+        self.args.max_streams = min(self.args.max_streams, 2)
         self.snapshot_dir = tempfile.mkdtemp()
         self.streams = {}
         self.cam = AsyncClient(

@@ -95,6 +95,12 @@ class UnifiCamBase(metaclass=ABCMeta):
             help="Transcoding args for `ffmpeg -i <src> <args> <dst>`",
         )
         parser.add_argument(
+            "--ts-mode",
+            choices=["wallclock", "copyts"],
+            default="wallclock",
+            help="Timestamp strategy: wallclock (default) or passthrough copyts.",
+        )
+        parser.add_argument(
             "--rtsp-transport",
             default="tcp",
             choices=["tcp", "udp", "http", "udp_multicast"],
@@ -985,14 +991,28 @@ class UnifiCamBase(metaclass=ABCMeta):
         return False
 
     def get_base_ffmpeg_args(self, stream_index: str = "") -> list[str]:
-        base_args = [
-            "-avoid_negative_ts",
-            "make_zero",
-            "-fflags",
-            "+genpts+discardcorrupt",
-            "-use_wallclock_as_timestamps",
-            "1",
-        ]
+        if self.args.ts_mode == "copyts":
+            base_args = [
+                "-fflags",
+                "nobuffer+discardcorrupt",
+                "-copyts",
+                "-start_at_zero",
+                "-vsync",
+                "passthrough",
+                "-analyzeduration",
+                "2000000",
+                "-probesize",
+                "2000000",
+            ]
+        else:
+            base_args = [
+                "-avoid_negative_ts",
+                "make_zero",
+                "-fflags",
+                "+genpts+discardcorrupt",
+                "-use_wallclock_as_timestamps",
+                "1",
+            ]
 
         try:
             output = subprocess.check_output(["ffmpeg", "-h", "full"])
