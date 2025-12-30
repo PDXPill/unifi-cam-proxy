@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import re
 import ssl
 
 import backoff
@@ -28,6 +29,14 @@ class Core(object):
         uri = "wss://{}:7442/camera/1.0/ws?token={}".format(self.host, self.token)
         headers = {"camera-mac": self.mac}
         has_connected = False
+        invalid_status_exceptions = tuple(
+            exc
+            for exc in (
+                getattr(websockets.exceptions, "InvalidStatusCode", None),
+                getattr(websockets.exceptions, "InvalidStatus", None),
+            )
+            if exc is not None
+        )
 
         @backoff.on_predicate(
             backoff.expo,
@@ -78,14 +87,26 @@ class Core(object):
                     else:
                         raise
                 has_connected = True
-            except websockets.exceptions.InvalidStatusCode as e:
-                if e.status_code == 403:
+            except invalid_status_exceptions as e:
+                status_code = getattr(e, "status_code", None)
+                if status_code is None:
+                    response = getattr(e, "response", None)
+                    if response is not None:
+                        status_code = getattr(response, "status_code", None)
+                        if status_code is None:
+                            status_code = getattr(response, "status", None)
+                if status_code is None:
+                    match = re.search(r"\bHTTP\s+(\d{3})\b", str(e))
+                    if match:
+                        status_code = int(match.group(1))
+
+                if status_code == 403:
                     self.logger.error(
-                        f"The token '{self.token}'"
-                        " is invalid. Please generate a new one and try again."
+                        "Adoption token is invalid or expired; generate a new one and try again."
                     )
+                    return False
                 # Hitting rate-limiting
-                elif e.status_code == 429:
+                if status_code == 429:
                     return True
                 raise
             except asyncio.exceptions.TimeoutError:
@@ -110,3 +131,5 @@ class Core(object):
                 await self.cam.close()
 
         await connect()
+        if not has_connected:
+            raise SystemExit(1)
