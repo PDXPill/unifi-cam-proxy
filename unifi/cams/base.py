@@ -100,6 +100,13 @@ class UnifiCamBase(metaclass=ABCMeta):
             choices=["tcp", "udp", "http", "udp_multicast"],
             help="RTSP transport protocol used by stream",
         )
+        parser.add_argument(
+            "--max-streams",
+            type=int,
+            choices=[1, 2, 3],
+            default=3,
+            help="Limit the number of RTSP streams to open (1-3).",
+        )
 
     async def _run(self, ws) -> None:
         self._session = ws
@@ -163,6 +170,10 @@ class UnifiCamBase(metaclass=ABCMeta):
         if not extra:
             return []
         return shlex.split(extra)
+
+    def _is_stream_enabled(self, stream_index: str) -> bool:
+        stream_order = {"video1": 1, "video2": 2, "video3": 3}
+        return stream_order.get(stream_index, 1) <= self.args.max_streams
 
     async def get_feature_flags(self) -> dict[str, Any]:
         return {
@@ -412,6 +423,11 @@ class UnifiCamBase(metaclass=ABCMeta):
         if msg["payload"] is not None and "video" in msg["payload"]:
             for k, v in msg["payload"]["video"].items():
                 if v:
+                    if not self._is_stream_enabled(k):
+                        vid_dst[k] = ["file:///dev/null"]
+                        self._streams.pop(k, None)
+                        self.stop_video_stream(k)
+                        continue
                     if "avSerializer" in v:
                         vid_dst[k] = v["avSerializer"]["destinations"]
                         if "/dev/null" in vid_dst[k]:
@@ -509,7 +525,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "bitRateVbrMax": 2800000,
                         "bitRateVbrMin": 48000,
                         "description": "Hi quality video track",
-                        "enabled": True,
+                        "enabled": self._is_stream_enabled("video1"),
                         "fps": 15,
                         "gopModel": 0,
                         "height": 1080,
@@ -569,7 +585,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "bitRateVbrMin": 48000,
                         "currentVbrBitrate": 1200000,
                         "description": "Medium quality video track",
-                        "enabled": True,
+                        "enabled": self._is_stream_enabled("video2"),
                         "fps": 15,
                         "gopModel": 0,
                         "height": 720,
@@ -629,7 +645,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "bitRateVbrMin": 48000,
                         "currentVbrBitrate": 200000,
                         "description": "Low quality video track",
-                        "enabled": True,
+                        "enabled": self._is_stream_enabled("video3"),
                         "fps": 15,
                         "gopModel": 0,
                         "height": 360,
