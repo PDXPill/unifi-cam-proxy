@@ -2,6 +2,7 @@ import argparse
 import atexit
 import json
 import logging
+import os
 import shlex
 import shutil
 import ssl
@@ -65,6 +66,9 @@ class SmartDetectObjectType(Enum):
 class UnifiCamBase(metaclass=ABCMeta):
     def __init__(self, args: argparse.Namespace, logger: logging.Logger) -> None:
         self.args = args
+        # Allow overriding ffmpeg args via env to avoid CLI parsing issues in some runtimes.
+        if os.getenv("FFMPEG_ARGS"):
+            self.args.ffmpeg_args = os.getenv("FFMPEG_ARGS")
         self.logger = logger
 
         self._msg_id: int = 0
