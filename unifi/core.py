@@ -59,7 +59,9 @@ class Core(object):
         )
         async def connect():
             nonlocal has_connected
-            self.logger.info(f"Creating ws connection to {uri}")
+            self.logger.info(
+                f"Creating ws connection to wss://{self.host}:7442/camera/1.0/ws"
+            )
             try:
                 connect_kwargs = {
                     "ssl": self.ssl_context,

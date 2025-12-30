@@ -2,6 +2,7 @@ import argparse
 import atexit
 import json
 import logging
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -22,6 +23,39 @@ from unifi.core import RetryableError
 
 AVClientRequest = AVClientResponse = dict[str, Any]
 
+try:
+    from websockets import exceptions as ws_exceptions
+except Exception:
+    ws_exceptions = None
+
+
+def _redact_token(token: Optional[str]) -> str:
+    if not token:
+        return "<empty>"
+    if len(token) <= 8:
+        return "***"
+    return f"{token[:4]}...{token[-4:]}"
+
+
+def _redact_url_credentials(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.username or parsed.password:
+            host = parsed.hostname or ""
+            if parsed.port:
+                host = f"{host}:{parsed.port}"
+            user = parsed.username or ""
+            if user:
+                netloc = f"{user}:***@{host}"
+            else:
+                netloc = f"***@{host}"
+            return urllib.parse.urlunsplit(
+                (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+            )
+    except Exception:
+        return url
+    return url
+
 
 class SmartDetectObjectType(Enum):
     PERSON = "person"
@@ -40,7 +74,7 @@ class UnifiCamBase(metaclass=ABCMeta):
         self._motion_event_id: int = 0
         self._motion_event_ts: Optional[float] = None
         self._motion_object_type: Optional[SmartDetectObjectType] = None
-        self._ffmpeg_handles: dict[str, subprocess.Popen] = {}
+        self._ffmpeg_handles: dict[str, list[subprocess.Popen]] = {}
 
         # Set up ssl context for requests
         self._ssl_context = ssl.create_default_context()
@@ -70,12 +104,33 @@ class UnifiCamBase(metaclass=ABCMeta):
     async def _run(self, ws) -> None:
         self._session = ws
         await self.init_adoption()
+        connection_closed_exceptions = tuple(
+            exc
+            for exc in (
+                getattr(ws_exceptions, "ConnectionClosedError", None)
+                if ws_exceptions is not None
+                else None,
+                getattr(ws_exceptions, "ConnectionClosed", None)
+                if ws_exceptions is not None
+                else None,
+                getattr(websockets, "ConnectionClosedError", None),
+                getattr(websockets, "ConnectionClosed", None),
+            )
+            if exc is not None
+        )
         while True:
             try:
                 msg = await ws.recv()
-            except websockets.exceptions.ConnectionClosedError:
-                self.logger.info(f"Connection to {self.args.host} was closed.")
-                raise RetryableError()
+            except Exception as e:
+                if connection_closed_exceptions and isinstance(
+                    e, connection_closed_exceptions
+                ):
+                    self.logger.info(f"Connection to {self.args.host} was closed.")
+                    raise RetryableError()
+                if "ConnectionClosed" in e.__class__.__name__:
+                    self.logger.info(f"Connection to {self.args.host} was closed.")
+                    raise RetryableError()
+                raise
 
             if msg is not None:
                 force_reconnect = await self.process(msg)
@@ -102,6 +157,12 @@ class UnifiCamBase(metaclass=ABCMeta):
 
     def get_extra_ffmpeg_args(self, stream_index: str = "") -> str:
         return self.args.ffmpeg_args
+
+    def get_extra_ffmpeg_args_list(self, stream_index: str = "") -> list[str]:
+        extra = self.get_extra_ffmpeg_args(stream_index)
+        if not extra:
+            return []
+        return shlex.split(extra)
 
     async def get_feature_flags(self) -> dict[str, Any]:
         return {
@@ -229,7 +290,7 @@ class UnifiCamBase(metaclass=ABCMeta):
 
     async def init_adoption(self) -> None:
         self.logger.info(
-            f"Adopting with token [{self.args.token}] and mac [{self.args.mac}]"
+            f"Adopting with token [{_redact_token(self.args.token)}] and mac [{self.args.mac}]"
         )
         await self.send(
             self.gen_response(
@@ -779,17 +840,18 @@ class UnifiCamBase(metaclass=ABCMeta):
 
         if path and path.exists():
             async with aiohttp.ClientSession() as session:
-                files = {"payload": open(path, "rb")}
-                files.update(msg["payload"].get("formFields", {}))
-                try:
-                    await session.post(
-                        msg["payload"]["uri"],
-                        data=files,
-                        ssl=self._ssl_context,
-                    )
-                    self.logger.debug(f"Uploaded {snapshot_type} from {path}")
-                except aiohttp.ClientError:
-                    self.logger.exception("Failed to upload snapshot")
+                with path.open("rb") as payload_file:
+                    files = {"payload": payload_file}
+                    files.update(msg["payload"].get("formFields", {}))
+                    try:
+                        await session.post(
+                            msg["payload"]["uri"],
+                            data=files,
+                            ssl=self._ssl_context,
+                        )
+                        self.logger.debug(f"Uploaded {snapshot_type} from {path}")
+                    except aiohttp.ClientError:
+                        self.logger.exception("Failed to upload snapshot")
         else:
             self.logger.warning(
                 f"Snapshot file {path} is not ready yet, skipping upload"
@@ -899,59 +961,116 @@ class UnifiCamBase(metaclass=ABCMeta):
 
         return False
 
-    def get_base_ffmpeg_args(self, stream_index: str = "") -> str:
+    def get_base_ffmpeg_args(self, stream_index: str = "") -> list[str]:
         base_args = [
             "-avoid_negative_ts",
             "make_zero",
             "-fflags",
             "+genpts+discardcorrupt",
-            "-use_wallclock_as_timestamps 1",
+            "-use_wallclock_as_timestamps",
+            "1",
         ]
 
         try:
             output = subprocess.check_output(["ffmpeg", "-h", "full"])
             if b"stimeout" in output:
-                base_args.append("-stimeout 15000000")
+                base_args.extend(["-stimeout", "15000000"])
             else:
-                base_args.append("-timeout 15000000")
+                base_args.extend(["-timeout", "15000000"])
         except subprocess.CalledProcessError:
             self.logger.exception("Could not check for ffmpeg options")
 
-        return " ".join(base_args)
+        return base_args
 
     async def start_video_stream(
         self, stream_index: str, stream_name: str, destination: tuple[str, int]
     ):
-        has_spawned = stream_index in self._ffmpeg_handles
-        is_dead = has_spawned and self._ffmpeg_handles[stream_index].poll() is not None
+        handles = self._ffmpeg_handles.get(stream_index)
+        has_spawned = handles is not None
+        is_dead = has_spawned and handles[0].poll() is not None
 
         if not has_spawned or is_dead:
+            if is_dead:
+                self.stop_video_stream(stream_index)
             source = await self.get_stream_source(stream_index)
-            cmd = (
-                "ffmpeg -nostdin -loglevel error -y"
-                f" {self.get_base_ffmpeg_args(stream_index)} -rtsp_transport"
-                f' {self.args.rtsp_transport} -i "{source}"'
-                f" {self.get_extra_ffmpeg_args(stream_index)} -metadata"
-                f" streamName={stream_name} -f flv - | {sys.executable} -m"
-                " unifi.clock_sync"
-                f" {'--write-timestamps' if self._needs_flv_timestamps else ''} | nc"
-                f" {destination[0]} {destination[1]}"
-            )
+            redacted_source = _redact_url_credentials(source)
+            ffmpeg_args = [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-y",
+            ]
+            ffmpeg_args += self.get_base_ffmpeg_args(stream_index)
+            ffmpeg_args += [
+                "-rtsp_transport",
+                self.args.rtsp_transport,
+                "-i",
+                source,
+            ]
+            ffmpeg_args += self.get_extra_ffmpeg_args_list(stream_index)
+            ffmpeg_args += [
+                "-metadata",
+                f"streamName={stream_name}",
+                "-f",
+                "flv",
+                "-",
+            ]
+
+            clock_args = [sys.executable, "-m", "unifi.clock_sync"]
+            if self._needs_flv_timestamps:
+                clock_args.append("--write-timestamps")
+            nc_args = ["nc", destination[0], str(destination[1])]
 
             if is_dead:
                 self.logger.warn(f"Previous ffmpeg process for {stream_index} died.")
 
             self.logger.info(
-                f"Spawning ffmpeg for {stream_index} ({stream_name}): {cmd}"
+                "Spawning ffmpeg for %s (%s): %s -> %s:%s",
+                stream_index,
+                stream_name,
+                redacted_source,
+                destination[0],
+                destination[1],
             )
-            self._ffmpeg_handles[stream_index] = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, shell=True
+            ffmpeg_proc = subprocess.Popen(
+                ffmpeg_args,
+                stdout=subprocess.PIPE,
             )
+            clock_proc = subprocess.Popen(
+                clock_args,
+                stdin=ffmpeg_proc.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            nc_proc = subprocess.Popen(
+                nc_args,
+                stdin=clock_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if ffmpeg_proc.stdout is not None:
+                ffmpeg_proc.stdout.close()
+            if clock_proc.stdout is not None:
+                clock_proc.stdout.close()
+            self._ffmpeg_handles[stream_index] = [
+                ffmpeg_proc,
+                clock_proc,
+                nc_proc,
+            ]
 
     def stop_video_stream(self, stream_index: str):
-        if stream_index in self._ffmpeg_handles:
+        handles = self._ffmpeg_handles.pop(stream_index, None)
+        if handles:
             self.logger.info(f"Stopping stream {stream_index}")
-            self._ffmpeg_handles[stream_index].kill()
+            for proc in handles:
+                if proc.poll() is None:
+                    proc.terminate()
+            for proc in handles:
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
     async def close(self):
         self.logger.info("Cleaning up instance")
@@ -959,5 +1078,5 @@ class UnifiCamBase(metaclass=ABCMeta):
         self.close_streams()
 
     def close_streams(self):
-        for stream in self._ffmpeg_handles:
+        for stream in list(self._ffmpeg_handles.keys()):
             self.stop_video_stream(stream)
