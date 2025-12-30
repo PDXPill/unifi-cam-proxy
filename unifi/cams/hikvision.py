@@ -4,7 +4,7 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import httpx
 import xmltodict
@@ -29,6 +29,7 @@ class HikvisionCam(UnifiCamBase):
         self.ptz_supported = False
         self.motion_in_progress: bool = False
         self._last_event_timestamp: Union[str, int] = 0
+        self._stream_meta: dict[int, dict[str, int]] = {}
 
     @classmethod
     def add_parser(cls, parser: argparse.ArgumentParser) -> None:
@@ -101,6 +102,122 @@ class HikvisionCam(UnifiCamBase):
             await self.cam.PTZCtrl.channels[1].absolute(
                 method="put", data=xmltodict.unparse(req, pretty=True)
             )
+
+    async def _fetch_stream_meta(self, stream_id: int) -> Optional[dict[str, int]]:
+        try:
+            resp = await self.cam.Streaming.channels[stream_id](method="get")
+        except httpx.RequestError as exc:
+            self.logger.warning(
+                "Failed to fetch stream settings for %s: %s", stream_id, exc
+            )
+            return None
+
+        def _to_int(value) -> Optional[int]:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            stream = resp.get("StreamingChannel", {})
+            video = stream.get("Video", {})
+            width = _to_int(
+                video.get("videoResolutionWidth") or video.get("width") or 0
+            )
+            height = _to_int(
+                video.get("videoResolutionHeight") or video.get("height") or 0
+            )
+            fps = _to_int(video.get("maxFrameRate") or video.get("videoFrameRate"))
+            bitrate_kbps = _to_int(
+                video.get("maxBitRate")
+                or video.get("videoBitrate")
+                or video.get("constantBitRate")
+            )
+            gop = _to_int(video.get("keyFrameInterval") or video.get("GOP"))
+        except AttributeError as exc:
+            self.logger.warning(
+                "Unexpected stream settings format for %s: %s", stream_id, exc
+            )
+            return None
+
+        meta: dict[str, int] = {}
+        if width and height:
+            meta["width"] = width
+            meta["height"] = height
+        if fps:
+            meta["fps"] = fps
+        if bitrate_kbps:
+            meta["bitrate"] = bitrate_kbps * 1000
+        if gop:
+            meta["gop"] = gop
+        return meta
+
+    async def _ensure_stream_meta(self) -> None:
+        if self._stream_meta:
+            return
+
+        main_stream = int(f"{self.channel}01")
+        sub_stream = int(f"{self.channel}0{self.substream}")
+        stream_ids = [main_stream, sub_stream]
+
+        results = await asyncio.gather(
+            *(self._fetch_stream_meta(stream_id) for stream_id in stream_ids)
+        )
+        for stream_id, meta in zip(stream_ids, results):
+            if meta:
+                self._stream_meta[stream_id] = meta
+
+    async def get_video_profiles(
+        self, vid_dst: dict[str, list[str]]
+    ) -> dict[str, Any]:
+        profiles = await super().get_video_profiles(vid_dst)
+        await self._ensure_stream_meta()
+
+        main_stream = int(f"{self.channel}01")
+        sub_stream = int(f"{self.channel}0{self.substream}")
+        mapping = {
+            "video1": main_stream,
+            "video2": sub_stream,
+            "video3": sub_stream,
+        }
+
+        for stream_index, stream_id in mapping.items():
+            meta = self._stream_meta.get(stream_id)
+            profile = profiles.get(stream_index)
+            if not meta or not profile:
+                continue
+
+            if "width" in meta and "height" in meta:
+                profile["width"] = meta["width"]
+                profile["height"] = meta["height"]
+            if meta.get("fps"):
+                profile["fps"] = meta["fps"]
+                if "validFpsValues" in profile:
+                    fps_set = set(profile["validFpsValues"])
+                    fps_set.add(meta["fps"])
+                    profile["validFpsValues"] = sorted(fps_set)
+            if meta.get("bitrate"):
+                profile["bitRateCbrAvg"] = meta["bitrate"]
+                profile["bitRateVbrMax"] = max(
+                    meta["bitrate"], profile.get("bitRateVbrMax", meta["bitrate"])
+                )
+                profile["bitRateVbrMin"] = min(
+                    profile.get("bitRateVbrMin", meta["bitrate"]), meta["bitrate"]
+                )
+                if "currentVbrBitrate" in profile:
+                    profile["currentVbrBitrate"] = meta["bitrate"]
+                if "validBitrateRangeMax" in profile:
+                    profile["validBitrateRangeMax"] = max(
+                        profile["validBitrateRangeMax"], meta["bitrate"]
+                    )
+                if "validBitrateRangeMin" in profile:
+                    profile["validBitrateRangeMin"] = min(
+                        profile["validBitrateRangeMin"], meta["bitrate"]
+                    )
+            if meta.get("gop"):
+                profile["N"] = meta["gop"]
+
+        return profiles
 
     async def get_stream_source(self, stream_index: str) -> str:
         substream = 1
