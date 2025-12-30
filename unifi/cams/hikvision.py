@@ -130,6 +130,14 @@ class HikvisionCam(UnifiCamBase):
                 video.get("videoResolutionHeight") or video.get("height") or 0
             )
             fps = _to_int(video.get("maxFrameRate") or video.get("videoFrameRate"))
+            # Some Hikvision models report fps in hundredths (e.g. 2500 == 25.00).
+            if fps and fps > 120:
+                if fps % 100 == 0:
+                    fps = fps // 100
+                elif fps % 1000 == 0:
+                    fps = fps // 1000
+            if fps:
+                fps = max(1, min(fps, 30))
             bitrate_kbps = _to_int(
                 video.get("maxBitRate")
                 or video.get("videoBitrate")
