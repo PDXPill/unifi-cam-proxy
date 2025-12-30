@@ -6,6 +6,11 @@ import ssl
 import backoff
 import websockets
 
+try:
+    from websockets import exceptions as ws_exceptions
+except Exception:
+    ws_exceptions = None
+
 
 class RetryableError(Exception):
     pass
@@ -32,8 +37,14 @@ class Core(object):
         invalid_status_exceptions = tuple(
             exc
             for exc in (
-                getattr(websockets.exceptions, "InvalidStatusCode", None),
-                getattr(websockets.exceptions, "InvalidStatus", None),
+                getattr(ws_exceptions, "InvalidStatusCode", None)
+                if ws_exceptions is not None
+                else None,
+                getattr(ws_exceptions, "InvalidStatus", None)
+                if ws_exceptions is not None
+                else None,
+                getattr(websockets, "InvalidStatusCode", None),
+                getattr(websockets, "InvalidStatus", None),
             )
             if exc is not None
         )
