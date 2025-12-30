@@ -1001,8 +1001,6 @@ class UnifiCamBase(metaclass=ABCMeta):
                 "nobuffer+discardcorrupt",
                 "-copyts",
                 "-start_at_zero",
-                "-vsync",
-                "passthrough",
                 "-analyzeduration",
                 "2000000",
                 "-probesize",
